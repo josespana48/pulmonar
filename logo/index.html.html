@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Monitor Ventilatorio - Dr. José V. España Pino</title>
+    <link rel="icon" type="image/png" href="logo_pulmon.png">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --accent: #fbff00; --bg: #000; --sidebar-bg: #111; --text: #fff; }
+        body { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: row; background: var(--bg); color: var(--text); margin: 0; overflow: hidden; height: 100vh; }
+        
+        /* Ajuste para móviles: Sidebar más angosto */
+        #sidebar { width: 180px; padding: 10px; background: var(--sidebar-bg); border-right: 1px solid #333; font-size: 0.7em; overflow-y: auto; height: 100vh; flex-shrink: 0; }
+        
+        header { border-bottom: 2px solid var(--accent); margin-bottom: 10px; padding-bottom: 8px; text-align: center; }
+        header img { width: 45px; height: 45px; border-radius: 50%; border: 1px solid var(--accent); background: #222; }
+        header h1 { font-size: 1em; color: var(--accent); margin: 0; }
+        
+        #main { flex-grow: 1; padding: 5px; display: flex; flex-direction: column; gap: 3px; position: relative; height: 100vh; width: 100%; }
+        .chart-container { flex: 1; background: #050505; border: 1px solid #222; position: relative; min-height: 0; touch-action: none; }
+        
+        label { display: block; margin-top: 5px; color: #00ccff; font-weight: bold; text-transform: uppercase; }
+        input, select { width: 100%; margin-top: 2px; padding: 4px; background: #1a1a1a; color: var(--accent); border: 1px solid #444; border-radius: 3px; font-family: monospace; font-size: 12px; }
+        input:disabled { opacity: 0.2; }
+        
+        button { width: 100%; padding: 10px; background: var(--accent); color: #000; border: none; cursor: pointer; font-weight: bold; margin-top: 10px; text-transform: uppercase; border-radius: 4px; font-size: 11px; }
+
+        .val-display { position: absolute; top: 5px; right: 8px; font-size: 10px; font-weight: bold; background: rgba(0,0,0,0.8); padding: 3px 6px; border: 1px solid var(--accent); color: var(--accent); z-index: 100; font-family: monospace; }
+        #delta-t-box { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #000; padding: 4px 12px; font-weight: bold; border-radius: 15px; font-size: 12px; display: none; z-index: 200; white-space: nowrap; }
+
+        /* Media query para pantallas muy pequeñas */
+        @media (max-width: 600px) {
+            #sidebar { width: 130px; font-size: 0.65em; }
+            header img { width: 35px; height: 35px; }
+            .val-display { font-size: 9px; min-width: 100px; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <header>
+        <img src="logo_pulmon.png" alt="Logo" onerror="this.style.display='none'">
+        <h1>MONITOR</h1>
+        <p><strong>Dr. España Pino</strong></p>
+    </header>
+
+    <label>Modo</label>
+    <select id="modoVent" onchange="ajustarModo()">
+        <option value="VCV">VCV</option>
+        <option value="PCV">PCV</option>
+    </select>
+
+    <label>Rel. I:E</label>
+    <select id="relIE" onchange="generar()">
+        <option value="1">1:1</option>
+        <option value="2" selected>1:2</option>
+        <option value="3">1:3</option>
+    </select>
+
+    <label id="lblPrincipal">Vol (mL)</label>
+    <input type="number" id="inputPrincipal" value="500">
+    <label id="lblPico">P. Pico</label>
+    <input type="number" id="inputPico" value="25">
+    <label id="lblMeseta">P. Meseta</label>
+    <input type="number" id="inputMeseta" value="15">
+    <label>PEEP</label>
+    <input type="number" id="inputPeep" value="5">
+    <label>FR (RPM)</label>
+    <input type="number" id="inputFr" value="15">
+    <label>Ventana (s)</label>
+    <input type="range" id="zoomX" min="5" max="20" value="10" oninput="generar()">
+    
+    <button onclick="generar()">ACTUALIZAR</button>
+</div>
+
+<div id="main">
+    <div id="delta-t-box">Δt: 0.000s</div>
+    <div class="chart-container"><div class="val-display" id="dP">P: --</div><canvas id="cP"></canvas></div>
+    <div class="chart-container"><div class="val-display" id="dF">F: --</div><canvas id="cF"></canvas></div>
+    <div class="chart-container"><div class="val-display" id="dV">V: --</div><canvas id="cV"></canvas></div>
+</div>
+
+<script>
+    let charts = {};
+    let isDragging = false, startIdx = null, currentIdx = -1;
+
+    const yellowLinePlugin = {
+        id: 'yellowLine',
+        afterDraw: (chart) => {
+            const ctx = chart.ctx;
+            const xAxis = chart.scales.x;
+            const area = chart.chartArea;
+            if (currentIdx >= 0 && chart.data.labels[currentIdx]) {
+                const xPos = xAxis.getPixelForValue(chart.data.labels[currentIdx]);
+                ctx.save(); ctx.beginPath(); ctx.moveTo(xPos, area.top); ctx.lineTo(xPos, area.bottom);
+                ctx.lineWidth = 2; ctx.strokeStyle = '#fbff00'; ctx.stroke(); ctx.restore();
+            }
+            if (isDragging && startIdx !== null) {
+                const x1 = xAxis.getPixelForValue(chart.data.labels[startIdx]);
+                const x2 = xAxis.getPixelForValue(chart.data.labels[currentIdx]);
+                ctx.save(); ctx.fillStyle = 'rgba(251, 255, 0, 0.15)';
+                ctx.fillRect(x1, area.top, x2 - x1, area.bottom - area.top); ctx.restore();
+            }
+        }
+    };
+
+    function ajustarModo() {
+        const modo = document.getElementById('modoVent').value;
+        const esPCV = (modo === "PCV");
+        document.getElementById('inputPico').disabled = esPCV;
+        document.getElementById('inputMeseta').disabled = esPCV;
+        document.getElementById('lblPrincipal').innerText = esPCV ? "Pres. Ctrl" : "Vol. Corr";
+        generar();
+    }
+
+    function handleInteraction(e) {
+        e.preventDefault();
+        const rect = charts.p.canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        
+        if (clientX >= rect.left && clientX <= rect.right) {
+            const points = charts.p.getElementsAtEventForMode(e, 'index', { intersect: false }, false);
+            if (points.length) {
+                currentIdx = points[0].index;
+                const t = charts.p.data.labels[currentIdx];
+                document.getElementById('dP').innerText = `P: ${charts.p.data.datasets[0].data[currentIdx]}`;
+                document.getElementById('dF').innerText = `F: ${charts.f.data.datasets[0].data[currentIdx]}`;
+                document.getElementById('dV').innerText = `V: ${charts.v.data.datasets[0].data[currentIdx]} | T: ${t}s`;
+                if (isDragging) {
+                    const diff = Math.abs(parseFloat(t) - parseFloat(charts.p.data.labels[startIdx])).toFixed(3);
+                    document.getElementById('delta-t-box').innerText = `Δt: ${diff}s`;
+                }
+            }
+            Object.values(charts).forEach(c => c.draw());
+        }
+    }
+
+    function init() {
+        const config = (color) => ({
+            type: 'line',
+            data: { labels: [], datasets: [{ data: [], borderColor: color, borderWidth: 2, pointRadius: 0 }] },
+            options: {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: { legend: false, tooltip: false },
+                scales: { 
+                    x: { grid: { color: '#111' }, ticks: { color: '#555', font: {size: 8}, maxTicksLimit: 5 } }, 
+                    y: { grid: { color: '#111' }, ticks: { color: '#444', font: {size: 8} } } 
+                }
+            },
+            plugins: [yellowLinePlugin]
+        });
+        charts.p = new Chart(document.getElementById('cP'), config('#ff3366'));
+        charts.f = new Chart(document.getElementById('cF'), config('#00ccff'));
+        charts.v = new Chart(document.getElementById('cV'), config('#00ffaa'));
+
+        const mainArea = document.getElementById('main');
+        
+        // Mouse Events
+        mainArea.addEventListener('mousedown', (e) => { isDragging = true; startIdx = currentIdx; document.getElementById('delta-t-box').style.display = 'block'; });
+        window.addEventListener('mousemove', handleInteraction);
+        window.addEventListener('mouseup', () => { isDragging = false; });
+
+        // Touch Events
+        mainArea.addEventListener('touchstart', (e) => { isDragging = true; startIdx = currentIdx; document.getElementById('delta-t-box').style.display = 'block'; handleInteraction(e); });
+        mainArea.addEventListener('touchmove', handleInteraction);
+        mainArea.addEventListener('touchend', () => { isDragging = false; });
+
+        generar();
+    }
+
+    function generar() {
+        const modo = document.getElementById('modoVent').value, valIn = +document.getElementById('inputPrincipal').value;
+        const pp_m = +document.getElementById('inputPico').value, pm_m = +document.getElementById('inputMeseta').value;
+        const peep = +document.getElementById('inputPeep').value, fr = +document.getElementById('inputFr').value;
+        const ie = +document.getElementById('relIE').value, tMax = +document.getElementById('zoomX').value;
+
+        const pp_t = pp_m + peep, pm_t = pm_m + peep;
+        const ciclo = 60 / fr, ti = ciclo / (1 + ie), ti_f = (modo === "VCV") ? ti * 0.90 : ti;
+
+        let pD = [], fD = [], vD = [], labs = [];
+        const dt = 0.02; // Menos puntos para mejorar rendimiento en móvil
+
+        for (let t = 0; t <= tMax; t += dt) {
+            labs.push(t.toFixed(2));
+            let tL = t % ciclo, p, f, v;
+            if (tL <= ti_f) {
+                if (modo === "VCV") {
+                    f = (valIn / ti_f) * 0.06; v = (valIn / ti_f) * tL;
+                    p = peep + (pp_t - peep) * (tL/ti_f);
+                } else {
+                    p = valIn + peep; f = 70 * Math.exp(-tL * 5); v = (valIn * 35) * (1 - Math.exp(-tL * 5));
+                }
+            } else if (tL <= ti) {
+                f = 0; v = valIn; p = (modo === "VCV" ? pm_t : valIn + peep);
+            } else {
+                let te = tL - ti; f = -45 * Math.exp(-te * 4);
+                v = (vD.length > 0 ? vD[vD.length-1] : valIn) * Math.exp(-te * 5);
+                p = peep + ((modo === "VCV" ? pm_t : valIn + peep) - peep) * Math.exp(-te * 6);
+            }
+            pD.push(p.toFixed(1)); fD.push(f.toFixed(1)); vD.push(v.toFixed(0));
+        }
+        charts.p.data.labels = labs; charts.p.data.datasets[0].data = pD;
+        charts.f.data.labels = labs; charts.f.data.datasets[0].data = fD;
+        charts.v.data.labels = labs; charts.v.data.datasets[0].data = vD;
+        Object.values(charts).forEach(c => c.update());
+    }
+
+    window.onload = init;
+</script>
+</body>
+</html>
